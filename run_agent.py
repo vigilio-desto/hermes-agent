@@ -2225,6 +2225,11 @@ class AIAgent:
                     "tool_calls": tool_calls_data,
                     "tool_call_id": msg.get("tool_call_id"),
                     "finish_reason": msg.get("finish_reason"),
+                    # token_count: stamped on assistant message dicts by
+                    # build_assistant_message from the provider usage; the
+                    # DB layer (append_messages_batch/_insert_message_rows)
+                    # persists it verbatim. Absent -> NULL, as before.
+                    "token_count": msg.get("token_count"),
                     # Reasoning/codex fields are role-gated (assistant-only)
                     # inside _insert_message_rows — pass through untouched.
                     "reasoning": msg.get("reasoning"),

@@ -3260,6 +3260,14 @@ class SessionStore:
             tool_name=message.get("tool_name"),
             tool_calls=message.get("tool_calls"),
             tool_call_id=message.get("tool_call_id"),
+            # token_count: stamped on assistant message dicts by
+            # build_assistant_message (provider usage); persist verbatim.
+            # Absent -> NULL, as before.
+            token_count=(
+                int(message["token_count"])
+                if message.get("token_count") is not None
+                else None
+            ),
             reasoning=message.get("reasoning") if message.get("role") == "assistant" else None,
             reasoning_content=message.get("reasoning_content") if message.get("role") == "assistant" else None,
             reasoning_details=message.get("reasoning_details") if message.get("role") == "assistant" else None,

@@ -6239,7 +6239,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         tool_name: str = None,
         tool_calls: Any = None,
         tool_call_id: str = None,
-        token_count: int = None,
+        token_count: Optional[int] = None,
         finish_reason: str = None,
         reasoning: str = None,
         reasoning_content: str = None,

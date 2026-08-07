@@ -1476,6 +1476,18 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         "finish_reason": finish_reason,
     }
 
+    # Stamp the run-time token meter: the normalized response carries the
+    # provider's per-call usage (prompt+completion). Persisting it on the
+    # message row gives the session DB a message-level token_count (the
+    # sessions-table totals are already written by queue_token_counts in
+    # conversation_loop; this is the per-message complement). Purely
+    # additive — absent usage leaves the column NULL exactly as before.
+    _resp_usage = getattr(assistant_message, "usage", None)
+    if _resp_usage is not None:
+        _total = getattr(_resp_usage, "total_tokens", 0) or 0
+        if _total > 0:
+            msg["token_count"] = int(_total)
+
     raw_reasoning_content = getattr(assistant_message, "reasoning_content", None)
     if raw_reasoning_content is None and hasattr(assistant_message, "model_extra"):
         model_extra = getattr(assistant_message, "model_extra", None) or {}
