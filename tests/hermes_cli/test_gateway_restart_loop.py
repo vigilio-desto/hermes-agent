@@ -560,6 +560,89 @@ class TestTerminalToolGatewayLifecycleGuard:
         assert result["exit_code"] == 0
         assert calls == ["systemctl status nginx"]
 
+    def test_small_binary_referenced_script_local_read_does_not_crash(
+        self, monkeypatch, tmp_path
+    ):
+        """A command referencing a small binary ELF by path must pass through.
+
+        _read_script_in_env's LOCAL read path decodes the binary with
+        errors='replace', preserving NUL bytes; the guard must treat that as
+        "nothing to scan" (mirroring lifecycle_guard's direct read) instead of
+        recursing into NUL-laden text and crashing with ValueError.
+        """
+        import tools.terminal_tool as tt
+
+        binary = tmp_path / "tool"
+        binary.write_bytes(
+            b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 512 + b"/bin/sh\x00"
+        )
+        binary.chmod(0o755)
+
+        calls = []
+
+        class _FakeEnv:
+            env = {}
+            def execute(self, command, **kwargs):
+                calls.append(command)
+                return {"output": "ok", "returncode": 0}
+
+        self._patch_env(monkeypatch, _FakeEnv(), inside_gateway=True)
+        monkeypatch.setattr(
+            tt, "_check_all_guards", lambda cmd, env, **kwargs: {"approved": True}
+        )
+        command = f"{binary} --help"
+
+        result = json.loads(tt.terminal_tool(command=command))
+
+        assert result["exit_code"] == 0
+        assert calls == [command]
+
+    def test_large_binary_referenced_script_cat_fallback_does_not_crash(
+        self, monkeypatch, tmp_path
+    ):
+        """A command referencing a binary ELF > 1MB must pass through.
+
+        The local read skips files over 1MB, so _read_script_in_env falls back
+        to ``env.execute('cat <path>')`` — for a remote/sandboxed backend that
+        returns the binary's bytes decoded with errors='replace' (NULs
+        preserved). The guard must treat that output as "nothing to scan"
+        rather than recursing into it and crashing (#76762 class).
+        """
+        import tools.terminal_tool as tt
+
+        binary = tmp_path / "tool-big"
+        binary.write_bytes(
+            b"\x7fELF\x02\x01\x01\x00" + b"\x00" * (1024 * 1024 + 512)
+        )
+        binary.chmod(0o755)
+
+        calls = []
+
+        class _FakeEnv:
+            env = {}
+            def execute(self, command, **kwargs):
+                calls.append(command)
+                if command.startswith("cat "):
+                    # Mimic a remote backend returning the binary's decoded
+                    # contents with NUL bytes preserved.
+                    return {"output": binary.read_bytes().decode("utf-8", errors="replace"), "returncode": 0}
+                return {"output": "ok", "returncode": 0}
+
+        self._patch_env(monkeypatch, _FakeEnv(), inside_gateway=True)
+        monkeypatch.setattr(
+            tt, "_check_all_guards", lambda cmd, env, **kwargs: {"approved": True}
+        )
+        command = f"{binary} --help"
+
+        result = json.loads(tt.terminal_tool(command=command))
+
+        assert result["exit_code"] == 0
+        # The guard's remote fallback asked for the script via `cat`, then the
+        # command itself ran — proving both the fallback path was exercised and
+        # the command was not blocked.
+        assert calls == [f"cat {binary}", command]
+
+
 
 # ---------------------------------------------------------------------------
 # cron.lifecycle_guard module — the shared checker create_job/CLI/terminal use
@@ -704,6 +787,46 @@ class TestLifecycleGuardModule:
         (tmp_path / "deploy.sh").write_text("#!/bin/bash\nhermes gateway stop\n")
         with pytest.raises(GatewayLifecycleBlocked):
             check_gateway_lifecycle("daily ops", str(script))
+
+    def test_binary_elf_with_remote_fallback_does_not_crash(self, tmp_path):
+        """A command referencing a binary ELF by path must not crash the
+        guard when the remote-read fallback returns NUL-laden decoded text.
+
+        The direct read already skips binaries (NUL in the first chunk ->
+        (None, False)), but terminal_tool._read_script_in_env's
+        ``env.execute('cat ...')`` fallback returns the binary's bytes decoded
+        with errors='replace', so NUL bytes survive as literal \\x00.
+        Tokenizing that text yields NUL-embedded paths; _read_referenced_script's
+        os.open must treat ValueError ("embedded null byte") like OSError
+        instead of crashing the whole terminal tool (#76762 class). The
+        fallback stub below models the fixed _read_script_in_env: it returns
+        the binary's decoded text for the primary path, and None for the
+        NUL-laden junk paths the recursion discovers (``cat`` on a path with
+        an embedded NUL fails), so the guard reaches a False verdict instead
+        of recursing to the depth limit.
+        """
+        from cron.lifecycle_guard import (
+            contains_gateway_lifecycle_command_or_referenced_script,
+        )
+        binary = tmp_path / "tool"
+        binary.write_bytes(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 512 + b"/bin/sh\x00")
+
+        def remote_read(script_path: str):
+            if "\x00" in script_path:
+                # cat on a NUL-embedded path fails -> no output.
+                return None
+            # Mimic _read_script_in_env's cat fallback: decoded with
+            # errors='replace', so NUL bytes survive as literal \x00.
+            return binary.read_bytes().decode("utf-8", errors="replace")
+
+        result = contains_gateway_lifecycle_command_or_referenced_script(
+            f"{binary} --help",
+            cwd=str(tmp_path),
+            read_remote_script=remote_read,
+        )
+        assert result is False
+
+
 
 
 # ---------------------------------------------------------------------------
